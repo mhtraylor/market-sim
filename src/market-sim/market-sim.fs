@@ -18,6 +18,7 @@ let getPrice = function
     | Ask (_,_,price)
     | Bid (_,_,price) -> price
 
+
 let sort (bids, asks) = 
     bids |> List.sortBy (getPrice >> (*) -1.0<gold>),   // highest to lowest
     asks |> List.sortBy getPrice                        // lowest to highest
@@ -26,25 +27,18 @@ let average (bids, asks) =
     let avg = bids |> List.append asks |> List.averageBy getPrice
     (avg, bids, asks)
 
-let calc d (bid, ask) =
-    if getPrice bid - getPrice ask >= d then None else Some (bid, ask)
+let calc d (Bid (x,bu,bp), Ask (y,au,ap)) =
+    let noUnits = bu = 0 || au = 0
+    let noPrice = bp <= 0.0<gold> || ap <= 0.0<gold>
+    if noUnits || noPrice || bp - ap >= d then
+        None
+    else
+        Some (Bid (x,bu,bp), Ask (y,au,ap))
 
-let close d (avg, bids, asks) =
+let close (avg, bids, asks) =
     bids
     |> List.zip asks
-    |> List.choose (calc d)
-
-let testBids =
-    [ Bid (Wood, 1, 1.0<gold>); Bid (Wood, 2, 1.5<gold>); Bid (Wood, 3, 2.0<gold>)]
-let testAsks =
-    [ Ask (Wood, 1, 2.0<gold>); Ask (Wood, 2, 3.0<gold>); Ask (Wood, 3, 6.0<gold>)]
-
-let test () =
-    (testBids, testAsks)
-    |> (sort >> average >> (close 2.0<gold>))
-    |> printfn "%A"
-
-// Output: [(Ask (Wood,1,2.0), Bid (Wood,3,2.0)); (Ask (Wood,2,3.0), Bid (Wood,2,1.5))]
+    |> List.choose (calc avg)
 
 type MarketCommand =
     | PostOffer of Offer
@@ -56,11 +50,11 @@ type MarketState =
 let market = MailboxProcessor.Start(fun inbox ->
     let rec loop state = async {
         let! msg = inbox.Receive()
-        let newState = 
+        let newState =
             match msg with
-            | PostOffer o -> 
+            | PostOffer o ->
                 match o with
-                | Bid (c,m,p) as b -> 
+                | Bid (c,m,p) as b ->
                     match state with
                     | Open (bids,asks) -> Open (b::bids,asks)
                     | c                -> c
@@ -70,10 +64,9 @@ let market = MailboxProcessor.Start(fun inbox ->
                     | c                -> c
             | Close       ->
                 match state with
-                | Open (bids,asks) -> (bids,asks) |> (sort >> average >> (close 2.0<gold>)) |> Closed
+                | Open (bids,asks) -> (bids,asks) |> (sort >> average >> close) |> Closed
                 | c                -> c
-        do printfn "message: %A" msg
-        do printfn "state: %A" newState
+        do printfn "%A" newState
         return! loop newState }
     loop (Open ([],[])))
 
@@ -87,9 +80,15 @@ let trader = fun _ ->
 
 [<EntryPoint>]
 let main argv =
-    printfn "%A" argv
-    test ()
-    for a in testAsks do a |> PostOffer |> market.Post
-    for b in testBids do b |> PostOffer |> market.Post
+    let r = System.Random()
+    let rnd cnt =
+        List.init cnt (fun _ -> r.Next(0,20))
+    let toGold x = float x * 1.0<gold>
+
+    10 |> rnd |> List.zip (rnd 10)
+    |> List.iter (fun (x,y) -> Bid (Wood, x, toGold y) |> PostOffer |> market.Post)
+    10 |> rnd |> List.zip (rnd 10)
+    |> List.iter (fun (x,y) -> Ask (Wood, x, toGold y) |> PostOffer |> market.Post)
+
     market.Post(Close)
     0 // return an integer exit code

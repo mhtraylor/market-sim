@@ -18,27 +18,33 @@ let getPrice = function
     | Ask (_,_,price)
     | Bid (_,_,price) -> price
 
+let getUnits = function
+    | Ask (_,units,_)
+    | Bid (_,units,_) -> units
+
+let toGold = float >> (*) 1.0<gold>
 
 let sort (bids, asks) = 
     bids |> List.sortBy (getPrice >> (*) -1.0<gold>),   // highest to lowest
     asks |> List.sortBy getPrice                        // lowest to highest
 
 let average (bids, asks) =
-    let avg = bids |> List.append asks |> List.averageBy getPrice
+    let avg = bids |> List.append asks |> List.averageBy (fun x -> getPrice x * (getUnits x |> toGold)) 
     (avg, bids, asks)
 
-let calc d (Bid (x,bu,bp), Ask (y,au,ap)) =
-    let noUnits = bu = 0 || au = 0
-    let noPrice = bp <= 0.0<gold> || ap <= 0.0<gold>
-    if noUnits || noPrice || bp - ap >= d then
+let calc avg (b,a) =
+    let p = (getPrice a - getPrice b) |> abs
+    if p > avg || p < avg then 
         None
     else
-        Some (Bid (x,bu,bp), Ask (y,au,ap))
+        Some (b,a)
 
-let close (avg, bids, asks) =
+let conjugate (avg, bids, asks) =
     bids
     |> List.zip asks
-    |> List.choose (calc avg)
+    |> List.choose (calc 2.0<gold>)
+
+let close = sort >> average >> conjugate
 
 type MarketCommand =
     | PostOffer of Offer
@@ -64,7 +70,7 @@ let market = MailboxProcessor.Start(fun inbox ->
                     | c                -> c
             | Close       ->
                 match state with
-                | Open (bids,asks) -> (bids,asks) |> (sort >> average >> close) |> Closed
+                | Open (bids,asks) -> (bids,asks) |> close |> Closed
                 | c                -> c
         do printfn "%A" newState
         return! loop newState }
@@ -85,10 +91,11 @@ let main argv =
         List.init cnt (fun _ -> r.Next(0,20))
     let toGold x = float x * 1.0<gold>
 
-    10 |> rnd |> List.zip (rnd 10)
+    100 |> rnd |> List.zip (rnd 100)
     |> List.iter (fun (x,y) -> Bid (Wood, x, toGold y) |> PostOffer |> market.Post)
-    10 |> rnd |> List.zip (rnd 10)
+    100 |> rnd |> List.zip (rnd 100)
     |> List.iter (fun (x,y) -> Ask (Wood, x, toGold y) |> PostOffer |> market.Post)
 
     market.Post(Close)
+    System.Threading.Thread.Sleep(10000)
     0 // return an integer exit code

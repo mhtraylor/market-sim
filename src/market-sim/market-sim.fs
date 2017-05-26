@@ -10,15 +10,15 @@ type Commodity =
     | Ore
     | Wheat
 
-type Offer =
-    | Ask of Details
-    | Bid of Details
-and
-    Details =
+type Details =
     { commodity : Commodity
       units     : int
       price     : float<gold>
       traderId  : int }
+
+type Offer =
+    | Ask of Details
+    | Bid of Details
 
 let getPrice = function | Ask x | Bid x -> x.price
 
@@ -28,12 +28,24 @@ let getTraderId = function | Ask x | Bid x -> x.traderId
 
 let toGold = float >> (*) 1.0<gold>
 
+type Trade = Trade of int * int * Details
+
+let trade' b a =
+    let avg = (b.price + a.price) / 2.0<gold> |> toGold
+    (b.traderId, a.traderId, { a with units=a.units; price=avg })
+    |> Trade
+
+let trade = function
+    | Bid b, Ask a -> trade' b a
+    | Ask a, Bid b -> trade' b a
+    | _            -> failwith "Invalid operation"
+
 let sort (bids, asks) = 
     bids |> List.sortBy (getPrice >> (*) -1.0<gold>),   // highest to lowest
     asks |> List.sortBy getPrice                        // lowest to highest
 
 let average (bids, asks) =
-    let avg = bids |> List.append asks |> List.averageBy (fun x -> getPrice x * (getUnits x |> toGold)) 
+    let avg = bids |> List.append asks |> List.averageBy (fun x -> getPrice x * (getUnits x |> float)) 
     (avg, bids, asks)
 
 let calc avg (b,a) =
@@ -47,18 +59,19 @@ let conjugate (avg, bids, asks) =
     bids
     |> List.zip asks
     |> List.choose (calc 2.0<gold>)
+    |> List.map trade
 
 let close = sort >> average >> conjugate
 
 type MarketCommand =
     | PostOffer of Offer
-    | Close of (Offer * Offer) list AsyncReplyChannel
+    | Close of Trade list AsyncReplyChannel
 
 type MarketState =
-    | Open of Offer list * Offer list | Closed of (Offer * Offer) list
+    | Open of Offer list * Offer list | Closed of Trade list
 
 let mktCloseEvent (ctx: System.Threading.SynchronizationContext) = 
-    let evt = Event<(Offer * Offer) list>()
+    let evt = Event<Trade list>()
     evt.Publish,fun t -> ctx.Post ((fun _ -> t |> evt.Trigger), null)
 
 let onMarketClose,sendMarketCloseEvent = 
@@ -116,8 +129,8 @@ let main argv =
 
     let trades = market.PostAndReply(Close)
     do printfn "Trades: %A" trades
-    let str = trades |> List.fold (fun s (a,b) -> 
-            sprintf "%s\n%d\t%f\t%d\t%f" s (getUnits a) (getPrice a) (getUnits b) (getPrice b)) "AskUnits AskPrice BidUnits BidPrice"
+    let str = trades |> List.fold (fun s (Trade (b,a,t)) -> 
+            sprintf "%s\n%d\t%f" s t.units t.price) "Units Price"
     use writer = new System.IO.StreamWriter(@"/home/mtraylor/trades.gnuplot")
     writer.WriteLine(str)
     0 // return an integer exit code

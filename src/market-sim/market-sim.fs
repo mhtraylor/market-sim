@@ -66,6 +66,7 @@ let close = sort >> average >> conjugate
 type MarketCommand =
     | PostOffer of Offer
     | Close of Trade list AsyncReplyChannel
+    | Start
 
 type MarketState =
     | Open of Offer list * Offer list | Closed of Trade list
@@ -77,31 +78,67 @@ let mktCloseEvent (ctx: System.Threading.SynchronizationContext) =
 let onMarketClose,sendMarketCloseEvent = 
     mktCloseEvent System.Threading.SynchronizationContext.Current
 
-let market = MailboxProcessor.Start(fun inbox ->
-    let rec loop state = async {
-        let! msg = inbox.Receive()
-        let newState =
-            match msg with
-            | PostOffer o ->
-                match o with
-                | Bid x as b ->
-                    match state with
-                    | Open (bids,asks) -> Open (b::bids,asks)
-                    | c                -> c
-                | Ask x as a ->
-                    match state with
-                    | Open (bids,asks) -> Open (bids,a::asks)
-                    | c                -> c
-            | Close r      ->
-                match state with
-                | Open (bids,asks) -> (bids,asks) |> close |> Closed
-                | c                -> c
-                |> fun (Closed trades as c) ->      // <- fix this
-                        r.Reply (trades)
-                        sendMarketCloseEvent trades
-                        c
-        return! loop newState }
-    loop (Open ([],[])))
+let market =
+    // Setup market agent
+    MailboxProcessor.Start(fun inbox ->
+        let rec loop state =
+            async { let! msg = inbox.Receive()
+                    let newState = 
+                        match state with
+                        | Open (bids,asks) ->
+                            match msg with
+                            | PostOffer offer -> 
+                                match offer with
+                                | Bid _ as b -> Open (b::bids,asks)
+                                | Ask _ as a -> Open (bids,a::asks)
+                            | Close reply     -> 
+                                let trades = (bids,asks) |> close
+                                reply.Reply trades;
+                                Closed trades
+                            | _               ->
+                                Open ([],[])
+                        | _                -> state
+                    return! loop newState }
+        ([],[]) |> Open |> loop)
+
+let timer round day (agent: MailboxProcessor<MarketCommand>) =
+    let t = new System.Timers.Timer(round)
+    t.AutoReset <- true
+    async { t.Start()
+            printfn "Markets open for trading"
+            do! Async.Sleep day
+            printfn "Markets no longer trading"
+            t.Stop() }
+    , t.Elapsed
+    |> Observable.map (fun _ -> 
+        do printfn "Closing trading round..."
+        do printfn "Opening new trading round...")
+
+// let market = MailboxProcessor.Start(fun inbox ->
+//     let rec loop state = async {
+//         let! msg = inbox.Receive()
+//         let newState =
+//             match msg with
+//             | PostOffer o ->
+//                 match o with
+//                 | Bid x as b ->
+//                     match state with
+//                     | Open (bids,asks) -> Open (b::bids,asks)
+//                     | c                -> c
+//                 | Ask x as a ->
+//                     match state with
+//                     | Open (bids,asks) -> Open (bids,a::asks)
+//                     | c                -> c
+//             | Close r      ->
+//                 match state with
+//                 | Open (bids,asks) -> (bids,asks) |> close |> Closed
+//                 | c                -> c
+//                 |> fun (Closed trades as c) ->      // <- fix this
+//                         r.Reply (trades)
+//                         sendMarketCloseEvent trades
+//                         c
+//         return! loop newState }
+//     loop (Open ([],[])))
 
 let trader = fun _ -> 
     MailboxProcessor.Start(fun inbox ->
@@ -113,6 +150,13 @@ let trader = fun _ ->
 
 [<EntryPoint>]
 let main argv =
+    let task,events = timer 3000.0 15000 market
+    events
+    |> Observable.subscribe (printfn "Trades: %A")
+    |> ignore
+
+    task |> Async.RunSynchronously
+
     let r = System.Random()
     let rnd cnt =
         List.init cnt (fun _ -> r.Next(0,20))
@@ -131,6 +175,6 @@ let main argv =
     do printfn "Trades: %A" trades
     let str = trades |> List.fold (fun s (Trade (b,a,t)) -> 
             sprintf "%s\n%d\t%f" s t.units t.price) "Units Price"
-    use writer = new System.IO.StreamWriter(@"/home/mtraylor/trades.gnuplot")
+    use writer = new System.IO.StreamWriter(@"/home/mhtraylor/trades.gnuplot")
     writer.WriteLine(str)
     0 // return an integer exit code

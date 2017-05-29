@@ -56,18 +56,27 @@ let close = sort >> resolve
 
 // Agents
 
+open System.Threading
+
 type MarketCommand =
     | PostBid of Offer
     | PostAsk of Offer
-    | Close of Trade list AsyncReplyChannel
+    | Close
+    | CloseAndReply of Trade list AsyncReplyChannel
     | Start
 
 type MarketState =
     | Open of Offer list * Offer list | Closed of Trade list
 
-let market =
+let makeMarketEvent (ctx: SynchronizationContext) = 
+    let evt = Event<Trade list>()
+    evt.Publish,fun t -> evt.Trigger t
+    // evt.Publish,fun t -> ctx.Post ((fun _ -> t |> evt.Trigger), null)
+
+let market ctx =
+    let evt,fire = makeMarketEvent ctx
     // Setup market agent
-    MailboxProcessor.Start(fun inbox ->
+    let agent = MailboxProcessor.Start(fun inbox ->
         let rec loop state =
             async { let! msg = inbox.Receive()
                     let newState = 
@@ -76,25 +85,32 @@ let market =
                             match msg with
                             | PostBid b   -> Open (b::bids,asks)
                             | PostAsk a   -> Open (bids,a::asks)
-                            | Close reply ->
+                            | Close       ->
+                                printfn "Closing trades"
                                 let trades = (bids,asks) |> close
-                                reply.Reply trades;
+                                fire trades
+                                printfn "Traders notified"
                                 Closed trades
+                            | CloseAndReply r ->
+                                match state with
+                                | Closed t -> r.Reply t; Closed t
+                                | s -> s
                             | _               ->
                                 Open ([],[])
                         | _                -> state
                     return! loop newState }
         ([],[]) |> Open |> loop)
+    agent,evt
 
-let timer round day (agent: MailboxProcessor<MarketCommand>) =
+let timer round day =
     let t = new System.Timers.Timer(round)
     t.AutoReset <- true
     async { t.Start()
             printfn "Markets open for trading"
             do! Async.Sleep day
             printfn "Markets no longer trading"
-            t.Stop() }
-    , t.Elapsed
+            t.Stop() },
+    t.Elapsed |> Observable.map (fun _ -> Close)
 
 let trader = fun _ -> 
     MailboxProcessor.Start(fun inbox ->
@@ -106,12 +122,9 @@ let trader = fun _ ->
 
 [<EntryPoint>]
 let main argv =
-    let task,events = timer 3000.0 15000 market
-    events
-    |> Observable.subscribe (printfn "Trades: %A")
-    |> ignore
-
-    task |> Async.RunSynchronously
+    // Simple random demo
+    let market,onMarketClose = market SynchronizationContext.Current
+    let task,event = timer 3000.0 15000
 
     let r = System.Random()
     let rnd cnt =
@@ -127,14 +140,22 @@ let main argv =
             { commodity=Wood; units=x * 1<kg>; price=toGold y } 
             |> PostBid |> market.Post)
 
-    let trades = market.PostAndReply(Close)
-    do printfn "Trades: %A" trades
-    let str = trades |> List.sortBy (fun (Trade(s,_,_)) -> s.units) |> List.fold (fun s (Trade (b,a,t)) -> 
-            let p = (float(b.units) * b.price)
-            let u = (b.price / float(b.units))
-            sprintf "%s\n%d\t%f\t%f\t%f" s b.units b.price p u) ""
-    use writer = new System.IO.StreamWriter(@"/home/mhtraylor/trades.gnuplot")
-    writer.WriteLine(str)
+    onMarketClose 
+        |> Observable.add (printfn "Trades: %A")
+
+    event 
+        |> Observable.add (market.Post)
+
+    task |> Async.RunSynchronously
+
+    // let trades = market.PostAndReply(CloseAndReply)
+    // do printfn "Trades: %A" trades
+    // let str = trades |> List.sortBy (fun (Trade(s,_,_)) -> s.units) |> List.fold (fun s (Trade (b,a,t)) -> 
+    //         let p = (float(b.units) * b.price)
+    //         let u = (b.price / float(b.units))
+    //         sprintf "%s\n%d\t%f\t%f\t%f" s b.units b.price p u) ""
+    // use writer = new System.IO.StreamWriter(@"/home/mhtraylor/trades.gnuplot")
+    // writer.WriteLine(str)
     0 // return an integer exit code
 
 // let mktCloseEvent (ctx: System.Threading.SynchronizationContext) = 
